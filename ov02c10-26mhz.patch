@@ -1,0 +1,209 @@
+From: Minjun Kim <mjkim5216@gmail.com>
+Subject: [PATCH] media: i2c: ov02c10: Support a 26 MHz external clock
+
+The Samsung Galaxy Book4 Pro (940XGK) feeds the OV02C10 a fixed 26 MHz
+clock from an INT3472 discrete device, which can't be reprogrammed, so
+probing failed with "external clock 26000000 is not supported".
+
+At 26 MHz, apply the overrides from the vendor's Windows driver for the
+same mode on top of the 19.2 MHz tables: PLL1 for a 333.125 MHz link with
+matching MIPI timing, and the system PLL scaled to keep the 19.2 MHz pixel
+timing, so the mode still runs at 30 fps with the same pixel rate. The
+vendor table only covers 2 lanes, so 26 MHz is refused with 1 lane.
+
+Also report 180 degrees rotation on this laptop, where the firmware says 0
+but the sensor is mounted upside down, and implement get_selection for the
+pixel array so userspace doesn't have to guess it.
+
+---
+--- a/drivers/media/i2c/ov02c10.c
++++ b/drivers/media/i2c/ov02c10.c
+@@ -4,6 +4,7 @@
+ #include <linux/acpi.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
++#include <linux/dmi.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
+@@ -15,7 +16,13 @@
+ #include <media/v4l2-fwnode.h>
+ 
+ #define OV02C10_LINK_FREQ_400MHZ	400000000ULL
++/*
++ * With a 26 MHz clock the MIPI link runs at 26 / 6 * 369 MHz VCO, against
++ * 19.2 / 4 * 400 MHz for the 400 MHz setting: 333.125 MHz.
++ */
++#define OV02C10_LINK_FREQ_333MHZ	333125000ULL
+ #define OV02C10_MCLK			19200000
++#define OV02C10_MCLK_26MHZ		26000000
+ #define OV02C10_RGB_DEPTH		10
+ 
+ #define OV02C10_REG_CHIP_ID		CCI_REG16(0x300a)
+@@ -340,6 +347,42 @@
+ 
+ static const s64 link_freq_menu_items[] = {
+ 	OV02C10_LINK_FREQ_400MHZ,
++	OV02C10_LINK_FREQ_333MHZ,
++};
++
++/*
++ * Overrides for a 26 MHz clock (2 lanes), written after the 19.2 MHz mode
++ * and lane tables. From the Windows driver's 26 MHz table for the same
++ * mode: PLL1 for a 333.125 MHz link with its MIPI timing, and the system
++ * PLL (0x0315/0x0316) scaled to keep the 19.2 MHz pixel timing (30 fps).
++ */
++static const struct cci_reg_sequence ov02c10_26mhz_2lane_setting[] = {
++	{ CCI_REG8(0x0303), 0x06 },
++	{ CCI_REG16(0x0304), 0x0171 },
++	{ CCI_REG8(0x0316), 0x27 },
++	{ CCI_REG8(0x4825), 0x40 },
++	{ CCI_REG8(0x4826), 0x52 },
++	{ CCI_REG8(0x4819), 0x7a },
++	{ CCI_REG8(0x481b), 0x3c },
++	{ CCI_REG8(0x481f), 0x52 },
++	{ CCI_REG8(0x481d), 0x3c },
++	{ CCI_REG8(0x4823), 0x3c },
++	{ CCI_REG8(0x4837), 0x14 },
++};
++
++/*
++ * The sensor is mounted upside down, but the firmware (SSDB) reports 0
++ * degrees; report 180 so userspace corrects it with the sensor's flips.
++ */
++static const struct dmi_system_id ov02c10_upside_down[] = {
++	{
++		/* Samsung Galaxy Book4 Pro 14" */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "SAMSUNG ELECTRONICS CO., LTD."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "940XGK"),
++		},
++	},
++	{ }
+ };
+ 
+ static const struct ov02c10_mode supported_modes[] = {
+@@ -389,6 +432,9 @@
+ 	/* MIPI lane info */
+ 	u32 link_freq_index;
+ 	u8 mipi_lanes;
++
++	/* External clock rate, OV02C10_MCLK or OV02C10_MCLK_26MHZ */
++	unsigned long mclk;
+ };
+ 
+ static inline struct ov02c10 *to_ov02c10(struct v4l2_subdev *subdev)
+@@ -493,19 +539,28 @@
+ 	u32 vblank_min, vblank_max, vblank_default, vts_def;
+ 	struct v4l2_fwnode_device_properties props;
+ 	s64 exposure_max, h_blank, pixel_rate;
++	u8 link_freq;
+ 	int ret;
+ 
+ 	v4l2_ctrl_handler_init(ctrl_hdlr, 12);
+ 
++	/*
++	 * The firmware lists 400 MHz either way; with a 26 MHz clock the link
++	 * runs at 333.125 MHz, which the CSI-2 receiver is set up from.
++	 */
++	link_freq = ov02c10->mclk == OV02C10_MCLK_26MHZ ? 1 : ov02c10->link_freq_index;
+ 	ov02c10->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
+ 						    &ov02c10_ctrl_ops,
+ 						    V4L2_CID_LINK_FREQ,
+-						    ov02c10->link_freq_index, 0,
++						    link_freq, link_freq,
+ 						    link_freq_menu_items);
+ 	if (ov02c10->link_freq)
+ 		ov02c10->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+ 
+-	/* MIPI lanes are DDR -> use link-freq * 2 */
++	/*
++	 * MIPI lanes are DDR -> use link-freq * 2. The 26 MHz setup keeps the
++	 * pixel timing of the 400 MHz one, so this stays based on that.
++	 */
+ 	pixel_rate = div_u64(link_freq_menu_items[ov02c10->link_freq_index] *
+ 			     2 * ov02c10->mipi_lanes, OV02C10_RGB_DEPTH);
+ 
+@@ -562,6 +617,9 @@
+ 	if (ret)
+ 		return ret;
+ 
++	if (props.rotation == 0 && dmi_check_system(ov02c10_upside_down))
++		props.rotation = 180;
++
+ 	v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &ov02c10_ctrl_ops, &props);
+ 
+ 	if (ctrl_hdlr->error)
+@@ -612,6 +670,17 @@
+ 		goto out;
+ 	}
+ 
++	if (ov02c10->mclk == OV02C10_MCLK_26MHZ) {
++		ret = cci_multi_reg_write(ov02c10->regmap,
++					  ov02c10_26mhz_2lane_setting,
++					  ARRAY_SIZE(ov02c10_26mhz_2lane_setting),
++					  NULL);
++		if (ret) {
++			dev_err(ov02c10->dev, "failed to write 26 MHz settings\n");
++			goto out;
++		}
++	}
++
+ 	ret = __v4l2_ctrl_handler_setup(ov02c10->sd.ctrl_handler);
+ 	if (ret)
+ 		goto out;
+@@ -768,9 +837,30 @@
+ 	.s_stream = v4l2_subdev_s_stream_helper,
+ };
+ 
++static int ov02c10_get_selection(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++	case V4L2_SEL_TGT_NATIVE_SIZE:
++		/* The one mode reads out the whole pixel array */
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = supported_modes[0].width;
++		sel->r.height = supported_modes[0].height;
++		return 0;
++	}
++
++	return -EINVAL;
++}
++
+ static const struct v4l2_subdev_pad_ops ov02c10_pad_ops = {
+ 	.set_fmt = ov02c10_set_format,
+ 	.get_fmt = v4l2_subdev_get_fmt,
++	.get_selection = ov02c10_get_selection,
+ 	.enum_mbus_code = ov02c10_enum_mbus_code,
+ 	.enum_frame_size = ov02c10_enum_frame_size,
+ 	.enable_streams = ov02c10_enable_streams,
+@@ -892,10 +982,11 @@
+ 				     "failed to get imaging clock\n");
+ 
+ 	freq = clk_get_rate(ov02c10->img_clk);
+-	if (freq != OV02C10_MCLK)
++	if (freq != OV02C10_MCLK && freq != OV02C10_MCLK_26MHZ)
+ 		return dev_err_probe(ov02c10->dev, -EINVAL,
+ 				     "external clock %lu is not supported",
+ 				     freq);
++	ov02c10->mclk = freq;
+ 
+ 	v4l2_i2c_subdev_init(&ov02c10->sd, client, &ov02c10_subdev_ops);
+ 
+@@ -904,6 +995,10 @@
+ 	if (ret)
+ 		return ret;
+ 
++	if (ov02c10->mclk == OV02C10_MCLK_26MHZ && ov02c10->mipi_lanes != 2)
++		return dev_err_probe(ov02c10->dev, -EINVAL,
++				     "26 MHz clock is only supported with 2 lanes\n");
++
+ 	ret = ov02c10_get_pm_resources(ov02c10->dev);
+ 	if (ret)
+ 		return ret;

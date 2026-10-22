@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# libcamera software ISP tuning for the OmniVision OV02C10 in the Samsung
+# Galaxy Book4 Pro (940XGK). Installed as
+# /usr/share/libcamera/ipa/simple/ov02c10.yaml; a copy in
+# /etc/libcamera/ipa/simple/ takes precedence.
+#
+# The colour correction matrix was fitted to a Windows photo of the same
+# scene (daylight, 2026-10-22): 669 flat background blocks, white-balanced on
+# a whiteboard, rows summing to 1 so white stays white. It halved the colour
+# error against Windows (0.070 -> 0.031). One matrix is used for all colour
+# temperatures.
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+  - Awb:
+  - Ccm:
+      ccms:
+        - ct: 5000
+          ccm: [  1.156,  0.394, -0.550,
+                 -0.213,  1.758, -0.545,
+                  0.057, -1.152,  2.095 ]
+  - Adjust:
+  - Agc:
+...

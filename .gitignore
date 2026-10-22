@@ -1,0 +1,13 @@
+# Track only the recipe, patch, DKMS files, configs and docs; makepkg's
+# sources, build trees, packages and the test folders stay untracked
+/*
+!/.gitignore
+!/PKGBUILD
+!/README.md
+!/*.patch
+!/LICENSE*
+!/Kbuild
+!/Makefile
+!/dkms.conf
+!/ov02c10.yaml
+!/51-ipu6-camera.conf

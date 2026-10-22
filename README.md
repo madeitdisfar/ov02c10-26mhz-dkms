@@ -23,7 +23,7 @@ So there is no camera at all.
 The package also installs:
 
 - `/usr/share/libcamera/ipa/simple/ov02c10.yaml`: a colour correction matrix for libcamera's software ISP, fitted to a Windows photo of the same scene (without it, colours are washed out).
-- `/usr/share/wireplumber/wireplumber.conf.d/51-ipu6-camera.conf`: hides the IPU6's 48 raw capture nodes from PipeWire, so apps only list the real camera ("Built-in Front Camera"). USB webcams are not affected.
+- `/usr/share/wireplumber/wireplumber.conf.d/51-ipu6-camera.conf`: hides the IPU6's 48 raw capture nodes from PipeWire, so apps only list the real camera ("Built-in Front Camera"). USB webcams are not affected. It also suspends the camera 0.2 s after it goes idle, without pausing it first: PipeWire's libcamera camera (1.6.9), reopened while paused (within the default 5 s), keeps sending only a few frames per second.
 
 ## How DKMS uses it
 
